@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smash Bros 2D - V4 Mode IA & Vol</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 0;
+      background: #111;
+      color: white;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    h1 { margin: 10px 0 5px 0; color: #ffd700; font-size: 24px; text-transform: uppercase; }
+    canvas {
+      border: 4px solid #333;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+      background: #1a1a2e;
+      border-radius: 8px;
+    }
+    .controls-hint {
+      display: flex;
+      gap: 20px;
+      margin-top: 15px;
+      background: #222;
+      padding: 10px 20px;
+      border-radius: 10px;
+      border: 1px solid #444;
+      font-size: 13px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .p1-color { color: #ff4757; font-weight: bold; }
+    .p2-color { color: #1e90ff; font-weight: bold; }
+    .pause-color { color: #ffd700; font-weight: bold; }
+  </style>
+</head>
+<body>
+
+  <h1>💥 Smash Arena 2D 💥</h1>
+  <canvas id="gameCanvas" width="900" height="550"></canvas>
+
+  <div class="controls-hint">
+    <div><span class="p1-color">J1 (Rouge) :</span> Move <kbd>Q</kbd>/<kbd>D</kbd> | Vol/Saut <kbd>Z</kbd>/<kbd>S</kbd> | Attaque <kbd>F</kbd> | Vaisseau <kbd>S</kbd></div>
+    <div><span class="p2-color">J2 (Bleu) :</span> Move <kbd>←</kbd>/<kbd>→</kbd> | Saut <kbd>↑</kbd> | Attaque <kbd>L</kbd> | Tir <kbd>1</kbd></div>
+    <div><span class="pause-color">Pause :</span> Touche <kbd>5</kbd></div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    let gameState = 'MENU'; // MENU, PLAYING, PAUSED, GAMEOVER
+    let isAiMode = true;    // Mode IA activé par défaut
+    let winner = null;
+
+    const keys = {};
+    const projectiles = [];
+
+    window.addEventListener('keydown', e => {
+      // Menu Selection
+      if (gameState === 'MENU') {
+        if (e.code === 'Digit1' || e.code === 'Numpad1') {
+          isAiMode = true;
+          startGame();
+        }
+        if (e.code === 'Digit2' || e.code === 'Numpad2') {
+          isAiMode = false;
+          startGame();
+        }
+        return;
+      }
+
+      if (e.code === 'Digit5' || e.code === 'Numpad5') {
+        if (gameState === 'PLAYING') gameState = 'PAUSED';
+        else if (gameState === 'PAUSED') gameState = 'PLAYING';
+      }
+
+      if (gameState === 'GAMEOVER' && (e.code === 'Space' || e.code === 'Enter')) {
+        gameState = 'MENU';
+      }
+
+      if (gameState === 'PLAYING' && !keys[e.code]) {
+        // P1 Controls
+        if (e.code === 'KeyZ' && !p1.shipActive) p1.jump();
+        if (e.code === 'KeyF') p1.attack();
+        if (e.code === 'KeyS' && !p1.shipActive) p1.activateShip();
+
+        // P2 Controls (Humain seulement si pas en mode IA)
+        if (!isAiMode) {
+          if (e.code === 'ArrowUp') p2.jump();
+          if (e.code === 'KeyL') p2.attack();
+          if (e.code === 'Digit1' || e.code === 'Numpad1') p2.shootLaser();
+        }
+      }
+
+      keys[e.code] = true;
+    });
+
+    window.addEventListener('keyup', e => {
+      keys[e.code] = false;
+    });
+
+    const stage = { x: 180, y: 380, w: 540, h: 25 };
+
+    class Projectile {
+      constructor(x, y, vx, vy, color, radius, owner, damage, knockback) {
+        this.x = x;
+        this.y = y;
+        this.vx = vx;
+        this.vy = vy;
+        this.color = color;
+        this.radius = radius;
+        this.owner = owner;
+        this.damage = damage;
+        this.knockback = knockback;
+        this.active = true;
+      }
+
+      update(opponent) {
+        this.x += this.vx;
+        this.y += this.vy;
+
+        const dist = Math.hypot(this.x - (opponent.x + opponent.w/2), this.y - (opponent.y + opponent.h/2));
+        if (dist < this.radius + opponent.w/2) {
+          opponent.takeHit(this.vx > 0 ? 'right' : 'left', this.damage, this.knockback);
+          this.active = false;
+        }
+
+        if (this.x < -50 || this.x > canvas.width + 50 || this.y < -50 || this.y > canvas.height + 50) {
+          this.active = false;
+        }
+      }
+
+      draw() {
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    class Player {
+      constructor(id, x, color, facing) {
+        this.id = id;
+        this.spawnX = x;
+        this.spawnY = 200;
+        this.x = this.spawnX;
+        this.y = this.spawnY;
+        this.w = 36;
+        this.h = 50;
+        this.vx = 0;
+        this.vy = 0;
+        this.color = color;
+        this.facing = facing;
+        
+        this.percent = 0;
+        this.lives = 3;
+        this.isGrounded = false;
+        this.jumpsLeft = 2;
+        
+        this.isAttacking = false;
+        this.attackTimer = 0;
+        this.attackCooldown = 0;
+        this.attackBox = { x: 0, y: 0, w: 45, h: 40 };
+
+        // Spécial P1
+        this.shipActive = false;
+        this.shipTimer = 0;
+        this.shipCooldown = 0;
+        this.shipShootTimer = 0;
+
+        // Spécial P2
+        this.p2ShootCooldown = 0;
+      }
+
+      reset() {
+        this.x = this.spawnX;
+        this.y = this.spawnY;
+        this.vx = 0;
+        this.vy = 0;
+        this.percent = 0;
+        this.jumpsLeft = 2;
+        this.shipActive = false;
+      }
+
+      fullReset() {
+        this.reset();
+        this.lives = 3;
+        this.shipCooldown = 0;
+        this.p2ShootCooldown = 0;
+      }
+
+      jump() {
+        if (this.jumpsLeft > 0) {
+          this.vy = -12;
+          this.jumpsLeft--;
+          this.isGrounded = false;
+        }
+      }
+
+      attack() {
+        if (this.attackCooldown <= 0) {
+          this.isAttacking = true;
+          this.attackTimer = 10;
+          this.attackCooldown = 25;
+        }
+      }
+
+      activateShip() {
+        if (this.id === 1 && this.shipCooldown <= 0 && !this.shipActive) {
+          this.shipActive = true;
+          this.shipTimer = 300;     // 5 sec
+          this.shipCooldown = 600;  // 10 sec cooldown
+        }
+      }
+
+      shootLaser() {
+        if (this.id === 2 && this.p2ShootCooldown <= 0) {
+          const dir = this.facing === 'right' ? 1 : -1;
+          projectiles.push(new Projectile(
+            this.x + (dir === 1 ? this.w + 10 : -10),
+            this.y + this.h / 2,
+            dir * 14,
+            0,
+            '#00d2d3',
+            10,
+            2,
+            15,
+            9
+          ));
+          this.p2ShootCooldown = 180;
+        }
+      }
+
+      update(opponent) {
+        if (this.shipCooldown > 0) this.shipCooldown--;
+        if (this.p2ShootCooldown > 0) this.p2ShootCooldown--;
+
+        // MODE VAISSEAU (VOL SANS GRAVITÉ)
+        if (this.shipActive) {
+          this.shipTimer--;
+
+          // Contrôles de vol vertical
+          if (keys['KeyZ']) this.vy = -6;
+          else if (keys['KeyS']) this.vy = 6;
+          else this.vy *= 0.85;
+
+          // Tir automatique du vaisseau
+          this.shipShootTimer++;
+          if (this.shipShootTimer % 10 === 0) {
+            const dir = this.facing === 'right' ? 1 : -1;
+            projectiles.push(new Projectile(
+              this.x + (dir === 1 ? this.w + 5 : -5),
+              this.y + this.h - 10,
+              dir * 12,
+              (Math.random() - 0.5) * 2,
+              '#ff4757',
+              6,
+              1,
+              5,
+              4
+            ));
+          }
+
+          if (this.shipTimer <= 0) this.shipActive = false;
+        } else {
+          // Gravité normale quand pas en vaisseau
+          this.vy += 0.55;
+        }
+
+        // Déplacements
+        this.x += this.vx;
+        this.y += this.vy;
+
+        if (this.isGrounded) this.vx *= 0.8;
+        else this.vx *= 0.92;
+
+        // Stage Collision
+        const prevY = this.y - this.vy;
+        if (
+          !this.shipActive &&
+          this.x + this.w > stage.x &&
+          this.x < stage.x + stage.w &&
+          prevY + this.h <= stage.y &&
+          this.y + this.h >= stage.y &&
+          this.vy >= 0
+        ) {
+          this.y = stage.y - this.h;
+          this.vy = 0;
+          this.isGrounded = true;
+          this.jumpsLeft = 2;
+        } else if (!this.shipActive) {
+          this.isGrounded = false;
+        }
+
+        // Attaque CàC
+        if (this.attackCooldown > 0) this.attackCooldown--;
+        if (this.isAttacking) {
+          this.attackTimer--;
+          this.attackBox.y = this.y + 5;
+          this.attackBox.x = (this.facing === 'right') ? this.x + this.w : this.x - this.attackBox.w;
+
+          if (
+            this.attackBox.x < opponent.x + opponent.w &&
+            this.attackBox.x + this.attackBox.w > opponent.x &&
+            this.attackBox.y < opponent.y + opponent.h &&
+            this.attackBox.y + this.attackBox.h > opponent.y
+          ) {
+            opponent.takeHit(this.facing, 12, 6);
+            this.isAttacking = false;
+          }
+
+          if (this.attackTimer <= 0) this.isAttacking = false;
+        }
+
+        // Out of bounds / Mort
+        if (this.y > canvas.height + 100 || this.x < -100 || this.x > canvas.width + 100 || this.y < -150) {
+          this.lives--;
+          if (this.lives <= 0) {
+            winner = opponent.id;
+            gameState = 'GAMEOVER';
+          } else {
+            this.reset();
+          }
+        }
+      }
+
+      takeHit(direction, damage = 12, baseKnockback = 6) {
+        this.percent += damage;
+        const totalKnockback = baseKnockback + (this.percent * 0.12);
+        const dirMult = (direction === 'right') ? 1 : -1;
+        this.vx = totalKnockback * dirMult;
+        this.vy = -totalKnockback * 0.65;
+      }
+
+      draw() {
+        if (this.shipActive) {
+          ctx.fillStyle = '#70a1ff';
+          ctx.beginPath();
+          ctx.ellipse(this.x + this.w/2, this.y + this.h + 5, 30, 12, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.fillStyle = this.color;
+        ctx.fillRect(this.x, this.y, this.w, this.h);
+
+        ctx.fillStyle = 'white';
+        const eyeX = (this.facing === 'right') ? this.x + 22 : this.x + 6;
+        ctx.fillRect(eyeX, this.y + 10, 8, 8);
+
+        if (this.isAttacking) {
+          ctx.fillStyle = 'rgba(255, 255, 0, 0.6)';
+          ctx.fillRect(this.attackBox.x, this.attackBox.y, this.attackBox.w, this.attackBox.h);
+        }
+      }
+    }
+
+    const p1 = new Player(1, 300, '#ff4757', 'right');
+    const p2 = new Player(2, 540, '#1e90ff', 'left');
+
+    function startGame() {
+      p1.fullReset();
+      p2.fullReset();
+      projectiles.length = 0;
+      winner = null;
+      gameState = 'PLAYING';
+    }
+
+    // --- LOGIQUE INTELLIGENCE ARTIFICIELLE (IA) ---
+    function updateAI(ai, target) {
+      const stageCenter = stage.x + stage.w / 2;
+      const distX = target.x - ai.x;
+      const distY = target.y - ai.y;
+      const absDistX = Math.abs(distX);
+
+      // 1. Sauvetage (Si hors du terrain)
+      if (ai.x < stage.x - 20 || ai.x + ai.w > stage.x + stage.w + 20) {
+        if (ai.x < stageCenter) {
+          ai.vx = 4.5;
+          ai.facing = 'right';
+        } else {
+          ai.vx = -4.5;
+          ai.facing = 'left';
+        }
+        if (ai.vy > 0 && Math.random() < 0.25) {
+          ai.jump();
+        }
+        return;
+      }
+
+      // 2. Tir de Laser si en ligne de mire
+      if (ai.p2ShootCooldown <= 0 && Math.abs(distY) < 50 && absDistX > 100) {
+        ai.facing = distX > 0 ? 'right' : 'left';
+        ai.shootLaser();
+      }
+
+      // 3. Attaque CàC si très proche
+      if (absDistX < 50 && Math.abs(distY) < 40) {
+        ai.facing = distX > 0 ? 'right' : 'left';
+        ai.attack();
+      } 
+      // 4. Déplacement vers le joueur
+      else {
+        if (distX > 30) {
+          ai.vx = 4.5;
+          ai.facing = 'right';
+        } else if (distX < -30) {
+          ai.vx = -4.5;
+          ai.facing = 'left';
+        }
+
+        // Saut opportuniste si la cible est en hauteur
+        if (distY < -40 && Math.random() < 0.08) {
+          ai.jump();
+        }
+      }
+    }
+
+    function gameLoop() {
+      if (gameState === 'PLAYING') {
+        // CONTROLES P1 (Rouge)
+        if (keys['KeyQ']) { p1.vx = -5; p1.facing = 'left'; }
+        if (keys['KeyD']) { p1.vx = 5; p1.facing = 'right'; }
+
+        // CONTROLES P2 (IA ou Humain)
+        if (isAiMode) {
+          updateAI(p2, p1);
+        } else {
+          if (keys['ArrowLeft']) { p2.vx = -5; p2.facing = 'left'; }
+          if (keys['ArrowRight']) { p2.vx = 5; p2.facing = 'right'; }
+        }
+
+        p1.update(p2);
+        p2.update(p1);
+
+        for (let i = projectiles.length - 1; i >= 0; i--) {
+          const proj = projectiles[i];
+          const target = proj.owner === 1 ? p2 : p1;
+          proj.update(target);
+          if (!proj.active) projectiles.splice(i, 1);
+        }
+      }
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      ctx.fillStyle = '#2ed573';
+      ctx.fillRect(stage.x, stage.y, stage.w, stage.h);
+      ctx.fillStyle = '#1e8449';
+      ctx.fillRect(stage.x, stage.y + 10, stage.w, stage.h - 10);
+
+      projectiles.forEach(p => p.draw());
+      p1.draw();
+      p2.draw();
+
+      if (gameState === 'PLAYING' || gameState === 'PAUSED') drawHUD();
+
+      if (gameState === 'MENU') drawMenuOverlay();
+      else if (gameState === 'PAUSED') drawPauseOverlay();
+      else if (gameState === 'GAMEOVER') drawGameOverOverlay();
+
+      requestAnimationFrame(gameLoop);
+    }
+
+    function drawHUD() {
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 16px Arial';
+      ctx.fillStyle = p1.color;
+      ctx.fillText('J1 (ROUGE)', 200, 460);
+      ctx.font = 'bold 32px Arial';
+      ctx.fillStyle = p1.percent > 80 ? '#ff3838' : '#ffffff';
+      ctx.fillText(`${p1.percent}%`, 200, 495);
+
+      ctx.font = '12px Arial';
+      if (p1.shipActive) {
+        ctx.fillStyle = '#70a1ff';
+        ctx.fillText(`🚀 VOL & CANON (${Math.ceil(p1.shipTimer/60)}s)`, 200, 515);
+      } else if (p1.shipCooldown > 0) {
+        ctx.fillStyle = '#888';
+        ctx.fillText(`🚀 Recharge: ${Math.ceil(p1.shipCooldown/60)}s`, 200, 515);
+      } else {
+        ctx.fillStyle = '#2ed573';
+        ctx.fillText(`🚀 VAISSEAU PRÊT [S]`, 200, 515);
+      }
+      
+      for (let i = 0; i < p1.lives; i++) {
+        ctx.fillStyle = p1.color;
+        ctx.beginPath();
+        ctx.arc(175 + (i * 25), 535, 7, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.font = 'bold 16px Arial';
+      ctx.fillStyle = p2.color;
+      ctx.fillText(isAiMode ? 'J2 (IA BLEU)' : 'J2 (BLEU)', 700, 460);
+      ctx.font = 'bold 32px Arial';
+      ctx.fillStyle = p2.percent > 80 ? '#ff3838' : '#ffffff';
+      ctx.fillText(`${p2.percent}%`, 700, 495);
+
+      ctx.font = '12px Arial';
+      if (p2.p2ShootCooldown > 0) {
+        ctx.fillStyle = '#888';
+        ctx.fillText(`⚡ Laser: ${Math.ceil(p2.p2ShootCooldown/60)}s`, 700, 515);
+      } else {
+        ctx.fillStyle = '#00d2d3';
+        ctx.fillText(`⚡ LASER PRÊT [1]`, 700, 515);
+      }
+
+      for (let i = 0; i < p2.lives; i++) {
+        ctx.fillStyle = p2.color;
+        ctx.beginPath();
+        ctx.arc(675 + (i * 25), 535, 7, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function drawMenuOverlay() {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.9)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.textAlign = 'center';
+      
+      ctx.fillStyle = '#ffd700';
+      ctx.font = 'bold 44px Arial';
+      ctx.fillText('💥 SMASH ARENA 2D 💥', canvas.width / 2, 180);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 22px Arial';
+      ctx.fillText('Choisis ton mode de jeu :', canvas.width / 2, 260);
+
+      ctx.fillStyle = '#1e90ff';
+      ctx.fillRect(canvas.width / 2 - 180, 300, 360, 50);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 18px Arial';
+      ctx.fillText('[ Appuie sur 1 ] : 1 Joueur vs IA 🤖', canvas.width / 2, 332);
+
+      ctx.fillStyle = '#ff4757';
+      ctx.fillRect(canvas.width / 2 - 180, 370, 360, 50);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 18px Arial';
+      ctx.fillText('[ Appuie sur 2 ] : 2 Joueurs Local ⚔️', canvas.width / 2, 402);
+    }
+
+    function drawPauseOverlay() {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ffd700';
+      ctx.font = 'bold 42px Arial';
+      ctx.fillText('⏸️ PAUSE', canvas.width / 2, canvas.height / 2 - 20);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '18px Arial';
+      ctx.fillText('Appuie sur 5 pour reprendre', canvas.width / 2, canvas.height / 2 + 30);
+    }
+
+    function drawGameOverOverlay() {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const winningColor = (winner === 1) ? p1.color : p2.color;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = winningColor;
+      ctx.font = 'bold 44px Arial';
+      const label = (winner === 2 && isAiMode) ? 'L\'IA BLEUE' : `LE JOUEUR ${winner}`;
+      ctx.fillText(`🏆 VICTOIRE DE ${label} ! 🏆`, canvas.width / 2, canvas.height / 2 - 30);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '20px Arial';
+      ctx.fillText('Appuie sur ESPACE ou ENTRÉE pour revenir au menu', canvas.width / 2, canvas.height / 2 + 30);
+    }
+
+    requestAnimationFrame(gameLoop);
+  </script>
+</body>
+</html>
